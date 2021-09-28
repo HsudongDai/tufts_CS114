@@ -10,7 +10,7 @@ class IMServer(object):
         self.host = '127.0.0.1'
         self.port = 9999
 
-        signal.signal(signal.SIGINT, self.handler)
+        # signal.signal(signal.SIGINT, self.handler)
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setblocking(True)
@@ -28,9 +28,9 @@ class IMServer(object):
             data = sock.recv(1024).decode('utf-8')
             # print(sock.getpeername())
             # print(sock.getsockname())
-            if data == 'break':
-                break
-            if data:
+            # if data == 'break':
+            #     break
+            if data is not None:
                 print(data)
                 response = self.get_response()
                 sock.sendall(response.encode('utf-8'))
@@ -44,8 +44,8 @@ class IMServer(object):
     def run(self):
         while True:
             sock, addr = self.socket.accept()
-            thrd = threading.Thread(target=self.link, args=(sock, addr))
-            thrd.start()
+            # thrd = threading.Thread(target=self.link, args=(sock, addr))
+            # thrd.start()
 
     def handler(self):
         self.socket.close()
@@ -132,6 +132,8 @@ class IMClient(object):
                 msg = input()
                 self.send_message(msg)
                 if msg == 'break':
+                    break
+                while True:
                     break
         self.socket.close()
 
