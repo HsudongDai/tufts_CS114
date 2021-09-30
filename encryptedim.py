@@ -14,7 +14,7 @@ def pad(s: str) -> str:
     return s + padding
 
 
-def unpad(s):
+def unpad(s: str) -> str:
     return s[:-ord(s[len(s) - 1:])]
 
 
@@ -26,12 +26,6 @@ class SelectServer:
         self.confkey = confkey.encode('utf-8')
         self.authkey = authkey.encode('utf-8')
 
-        # signal.signal(signal, self.handler)
-        # no need for it.
-        # when meeting Ctrl+C, select would terminate by itself
-        # when meeting Ctrl+D, self.run() would raise an exception then invoke sys.exit()
-
-        # AF_INET means using IPv4
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
@@ -43,10 +37,9 @@ class SelectServer:
         self.in_channels = [self.socket, sys.stdin]  # list of readable sockets for select
         self.out_channels = []  # list of writable sockets for select
 
-        # self.msg_queues = {}                      # one-to-one connection, unnecessary to use a dict for msg queue
         self.encryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
         self.decryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
-        # self.verifier = HMAC.new(self.authkey, digestmod=SHA256)
+        self.verifier = HMAC.new(self.authkey, digestmod=SHA256)
 
     def wait_for_connection(self) -> socket.socket:
         conn, _ = self.socket.accept()
@@ -64,9 +57,19 @@ class SelectServer:
         # print("enc_msg is: ", enc_msg)
         temp = self.decryptor.decrypt(enc_msg)
         # print("decrypted msg is: ", temp)
-        enc_msg = unpad(temp)
+        enc_msg = unpad(temp.decode("utf-8"))
         # print("unpadded msg: ", enc_msg)
-        return enc_msg.decode("utf-8")
+        return enc_msg
+
+    def generate_mac(self, data: bytes) -> bytes:
+        return self.verifier.update(data).digest()
+
+    def verify_mac(self, data: bytes, mac: bytes) -> None:
+        try:
+            self.verifier.update(data).verify(mac)
+        except ValueError:
+            print('ERROR: HMAC verification failed')
+            sys.exit(-1)
 
     def run(self):
         sock = self.wait_for_connection()
@@ -74,15 +77,17 @@ class SelectServer:
             readable, _, _ = select.select(self.in_channels, [], [])
 
             if sock in readable:
-                data = sock.recv(1024)
+                raw_data = sock.recv(1024)
+                data, mac = raw_data[:-32], raw_data[-32:]
                 # print("Received data: ", data)
+                self.verify_mac(data, mac)
                 data = self.decrypt(data)
-                # if data == '':
-                #     if sock in self.out_channels:
-                #         self.out_channels.remove(sock)
-                #     self.in_channels.remove(sock)
-                #     sock.close()
-                #     break
+                if data == '':
+                    if sock in self.out_channels:
+                        self.out_channels.remove(sock)
+                    self.in_channels.remove(sock)
+                    sock.close()
+                    break
                 sys.stdout.write(data)
                 sys.stdout.flush()
             # r is sys.stdin, read inputs and send to the client
@@ -92,11 +97,23 @@ class SelectServer:
                 if msg is None or msg == "":
                     break
                 msg = self.encrypt(msg)
+                mac = self.generate_mac(msg)
+                msg += mac
                 sock.sendall(msg)
 
 
 class SelectClient:
-    def __init__(self, host, confkey, authkey, iv):
+    """
+    The client side of instant messaging service.
+    """
+    def __init__(self, host: str, confkey: str, authkey: str, iv: str):
+        """
+        :param host: the address of server
+        :param confkey: the confidential key of AES256
+        :param authkey: the authentification key of SHA256 in HMAC
+        :param iv: initialization vector to initialize encryptor in CBC mode. Without it, the first message would be lost
+        since it is viewed as the iv.
+        """
         self.dst_host = host
         self.dst_port = 9999
         self.confkey = confkey.encode('utf-8')
@@ -114,6 +131,11 @@ class SelectClient:
         # self.out_channels = []
 
     def encrypt(self, msg: str) -> bytes:
+        """
+        Encrypt messages in bytes and return the encrypted bytes
+        :param msg: str, plaintext you want to send.
+        :return: enc_msg: str, ciphertext after encryption.
+        """
         padded_msg = pad(msg)
         # print('Padded msg:', padded_msg.encode('utf-8'))
         enc_msg = self.encryptor.encrypt(padded_msg.encode("utf-8"))
@@ -121,12 +143,27 @@ class SelectClient:
         return enc_msg
 
     def decrypt(self, enc_msg: bytes) -> str:
+        """
+        Decrypt the received ciphered message.
+        :param enc_msg: bytes, ciphertext of raw messages
+        :return: plain_msg: str, plaintext after decryption
+        """
         # print("enc_msg is: ", enc_msg)
         temp = self.decryptor.decrypt(enc_msg)
         # print("decrypted msg is: ", temp)
-        enc_msg = unpad(temp)
+        plain_msg = unpad(temp.decode("utf-8"))
         # print("unpadded msg: ", enc_msg)
-        return enc_msg.decode("utf-8")
+        return plain_msg
+
+    def generate_mac(self, data: bytes) -> bytes:
+        return self.verifier.update(data).digest()
+
+    def verify_mac(self, data: bytes, mac: bytes) -> None:
+        try:
+            self.verifier.update(data).verify(mac)
+        except ValueError:
+            print('ERROR: HMAC verification failed')
+            sys.exit(-1)
 
     def run(self):
         while True:
@@ -139,12 +176,8 @@ class SelectClient:
                     if not msg:
                         sys.exit(-1)
                     else:
-                        # sys.stdout.write(msg.decode('utf-8'))
-                        # msg, hashx = msg[:-32], msg[-32:]
-                        # try:
-                        #     self.verifier.update(msg).verify(hashx)
-                        # except ValueError:
-                        #     sys.exit(-2)
+                        msg, mac = msg[:-32], msg[-32:]
+                        self.verify_mac(msg, mac)
                         msg = self.decrypt(msg)
                         sys.stdout.write(msg)
                         sys.stdout.flush()
@@ -157,7 +190,8 @@ class SelectClient:
                     msg = self.encrypt(msg)
                     # hashx = self.verifier.update(msg).digest()
                     # msg += hashx
-
+                    mac = self.generate_mac(msg)
+                    msg += mac
                     self.socket.sendall(msg)
 
 
@@ -175,6 +209,9 @@ if __name__ == '__main__':
     # if args.s is False and args.c is not None:
     #     raise AttributeError("s and c cannot be set simultaneously")
     # args.s = 1
+
+    # length of iv must be strictly 16 bytes
+    # to be more random, we pick the first 16 bytes from the confkey
     iv = args.confkey.encode('utf-8')[:16]
 
     if args.s and args.s >= 1:
