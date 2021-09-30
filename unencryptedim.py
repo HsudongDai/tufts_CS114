@@ -27,58 +27,44 @@ class SelectServer:
 
         # self.msg_queues = {}                      # one-to-one connection, unnecessary to use a dict for msg queue
 
+    def wait_for_connection(self):
+        conn, _ = self.socket.accept()
+        self.in_channels.append(conn)
+        return conn
+
     def run(self):
+        sock = self.wait_for_connection()
         while self.in_channels:
             readable, _, _ = select.select(self.in_channels, [], [])
 
-            for r in readable:
-                # r is the server, so build new connection with the client
-                if r is self.socket:
-                    cli_conn, cli_addr = self.socket.accept()
-                    self.in_channels.append(cli_conn)
-                    # print(f'Connection to {cli_addr} Established')
+            if sock in readable:
+                data = sock.recv(1024)
+                # data is not none, that is connection has not been broken
+                if data:
+                    # print(f"Receive message from {r.getpeername()}")
+                    # force to flush every message by setting flush=True
+                    data = data.decode('utf-8')
+                    data = data.strip('\n')
+                    data += '\n'
+                    sys.stdout.write(data)
+                    sys.stdout.flush()
+                    # print(data, flush=True)
 
-                # r is sys.stdin, read inputs and send to the client
-                elif r is sys.stdin:
-                    msg = sys.stdin.readline()
-                    # though sys.stdin.readline() won't stop until reading an EOF or \n,
-                    # it would be a better idea to check every message
-
-                    # when meeting Ctrl+D, it would raise an IndexError
-                    # so call sys.exit to kill the process
-                    if msg[-1] != '\n':
-                        try:
-                            msg += '\n'
-                        except IndexError:
-                            sys.exit(-1)
-                    # sendall forces to send all messages in the buffer
-                    # all messages must be encoded in UTF-8
-                    self.in_channels[-1].sendall(msg.encode('utf-8'))
-                # the connection to the client which has been built,
+                    if sock not in self.out_channels:
+                        self.out_channels.append(sock)
+                # connection has been broken, sockets must be removed from lists then closed
                 else:
-                    data = r.recv(1024)
-                    # data is not none, that is connection has not been broken
-                    if data:
-                        # print(f"Receive message from {r.getpeername()}")
-                        # force to flush every message by setting flush=True
-                        data = data.decode('utf-8')
-                        data = data.strip('\n')
-                        data += '\n'
-                        sys.stdout.write(data)
-                        sys.stdout.flush()
-                        # print(data, flush=True)
-
-                        if r not in self.out_channels:
-                            self.out_channels.append(r)
-                    # connection has been broken, sockets must be removed from lists then closed
-                    else:
-                        # print(f"Connection to {r.getpeername()} has been closed")
-                        if r in self.out_channels:
-                            self.out_channels.remove(r)
-                        self.in_channels.remove(r)
-                        r.close()
-            # Wait 0.5 second
-            # sleep(0.5)
+                    # print(f"Connection to {r.getpeername()} has been closed")
+                    if sock in self.out_channels:
+                        self.out_channels.remove(sock)
+                    self.in_channels.remove(sock)
+                    sock.close()
+            # r is sys.stdin, read inputs and send to the client
+            if sys.stdin in readable:
+                msg = sys.stdin.readline()
+                if msg is None or msg == "":
+                    break
+                sock.sendall(msg.encode('utf-8'))
 
 
 class SelectClient:
