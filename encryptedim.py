@@ -65,11 +65,8 @@ class SelectServer:
         return self.verifier.update(data).digest()
 
     def verify_mac(self, data: bytes, mac: bytes) -> None:
-        try:
-            self.verifier.update(data).verify(mac)
-        except ValueError:
-            print('ERROR: HMAC verification failed')
-            sys.exit(-1)
+        self.verifier.update(data).verify(mac)
+            # sys.exit(-1)
 
     def run(self):
         sock = self.wait_for_connection()
@@ -77,10 +74,17 @@ class SelectServer:
             readable, _, _ = select.select(self.in_channels, [], [])
 
             if sock in readable:
-                raw_data = sock.recv(1024)
+                raw_data = sock.recv(1500)
                 data, mac = raw_data[:-32], raw_data[-32:]
                 # print("Received data: ", data)
-                self.verify_mac(data, mac)
+                try:
+                    self.verify_mac(data, mac)
+                except ValueError:
+                    print("HMAC verification failed")
+                    if sock in self.out_channels:
+                        self.out_channels.remove(sock)
+                    self.in_channels.remove(sock)
+                    sock.close()
                 data = self.decrypt(data)
                 if data == '':
                     if sock in self.out_channels:
@@ -171,7 +175,7 @@ class SelectClient:
             for r in readable:
                 # if r is the socket, then receive the message and print
                 if r is self.socket:
-                    msg = r.recv(1024)
+                    msg = r.recv(1500)
                     # print("RAW_MSG: ", msg)
                     if not msg:
                         sys.exit(-1)
@@ -205,7 +209,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # The key must be 32 bytes long to use AES-256
-    assert len(args.confkey.encode('utf-8')) == 32
+    # assert len(args.confkey.encode('utf-8')) == 32
     # if args.s is False and args.c is not None:
     #     raise AttributeError("s and c cannot be set simultaneously")
     # args.s = 1
