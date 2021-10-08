@@ -1,3 +1,5 @@
+import os
+
 from Crypto.Cipher import AES
 from Crypto.Hash import HMAC, SHA256
 
@@ -15,11 +17,13 @@ def pad(s: str) -> str:
 
 
 def unpad(s: str) -> str:
+    if len(s) == 0:
+        return ""
     return s[:-ord(s[len(s) - 1:])]
 
 
 class SelectServer:
-    def __init__(self, confkey, authkey, iv):
+    def __init__(self, confkey, authkey):
         self.host = 'localhost'
         self.port = 9999
 
@@ -28,8 +32,6 @@ class SelectServer:
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
-        # self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
         self.socket.bind((self.host, self.port))
         self.socket.listen(3)  # listen up to 3 connections. in this case, 1 is enough
         # print('listening on 127.0.0.1:9999')
@@ -37,9 +39,10 @@ class SelectServer:
         self.in_channels = [self.socket, sys.stdin]  # list of readable sockets for select
         self.out_channels = []  # list of writable sockets for select
 
-        self.encryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
-        self.decryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
-        self.verifier = HMAC.new(self.authkey, digestmod=SHA256)
+        self.encryptor = None
+        self.decryptor = None
+        self.mac1_verifier = None
+        self.mac2_verifier = None
 
     def wait_for_connection(self) -> socket.socket:
         conn, _ = self.socket.accept()
@@ -61,56 +64,94 @@ class SelectServer:
         # print("unpadded msg: ", enc_msg)
         return enc_msg
 
-    def generate_mac(self, data: bytes) -> bytes:
-        return self.verifier.update(data).digest()
+    def generate_mac1(self, data: bytes) -> bytes:
+        return self.mac1_verifier.update(data).digest()
 
-    def verify_mac(self, data: bytes, mac: bytes) -> None:
-        self.verifier.update(data).verify(mac)
-            # sys.exit(-1)
+    def verify_mac1(self, data: bytes, mac: bytes) -> None:
+        # print('mac1 in method: ', data)
+        self.mac1_verifier.update(data).verify(mac)
+
+    def generate_mac2(self, data: bytes) -> bytes:
+        return self.mac2_verifier.update(data).digest()
+
+    def verify_mac2(self, data: bytes, mac: bytes) -> None:
+        # print('mac2 data: ', mac)
+        self.mac2_verifier.update(data).verify(mac)
+        # sys.exit(-1)
 
     def run(self):
-        sock = self.wait_for_connection()
-        while self.in_channels:
-            readable, _, _ = select.select(self.in_channels, [], [])
+        while True:
+            sock = self.wait_for_connection()
+            iv = sock.recv(32)
+            self.encryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
+            self.decryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
+            self.mac1_verifier = HMAC.new(self.authkey, digestmod=SHA256)
+            self.mac2_verifier = HMAC.new(self.authkey, digestmod=SHA256)
+            while self.in_channels:
+                readable, _, _ = select.select(self.in_channels, [], [])
 
-            if sock in readable:
-                raw_data = sock.recv(1500)
-                data, mac = raw_data[:-32], raw_data[-32:]
-                # print("Received data: ", data)
-                try:
-                    self.verify_mac(data, mac)
-                except ValueError:
-                    print("HMAC verification failed")
-                    if sock in self.out_channels:
-                        self.out_channels.remove(sock)
-                    self.in_channels.remove(sock)
-                    sock.close()
-                data = self.decrypt(data)
-                if data == '':
-                    if sock in self.out_channels:
-                        self.out_channels.remove(sock)
-                    self.in_channels.remove(sock)
-                    sock.close()
-                    break
-                sys.stdout.write(data)
-                sys.stdout.flush()
-            # r is sys.stdin, read inputs and send to the client
-            if sys.stdin in readable:
-                msg = sys.stdin.readline()
-                # print("Server read message: ", msg)
-                if msg is None or msg == "":
-                    break
-                msg = self.encrypt(msg)
-                mac = self.generate_mac(msg)
-                msg += mac
-                sock.sendall(msg)
+                if sock in readable:
+                    raw_data = sock.recv(1500)
+                    iv, msg_len, mac1, msg, mac2 = raw_data[:16], raw_data[16:32], raw_data[32:64], \
+                                                   raw_data[64: -32], raw_data[-32:]
+                    # print('iv: ', iv)
+                    # print('msg_len: ', msg_len)
+                    # print('mac1: ', mac1)
+                    # print('msg: ', msg)
+                    # print('mac2: ', mac2)
+                    # print("Received data: ", data)
+                    try:
+                        self.verify_mac1(iv + msg_len, mac1)
+                        self.verify_mac2(msg, mac2)
+                        # pass
+                    except ValueError:
+                        print("ERROR: HMAC mac1 verification failed")
+                        if sock in self.out_channels:
+                            self.out_channels.remove(sock)
+                        self.in_channels.remove(sock)
+                        sock.close()
+                        break
+                    msg_len = int(self.decrypt(msg_len))
+                    msg = self.decrypt(msg)
+                    if msg_len != len(msg):
+                        continue
+                    # if data == '':
+                    #     if sock in self.out_channels:
+                    #         self.out_channels.remove(sock)
+                    #     self.in_channels.remove(sock)
+                    #     sock.close()
+                    #     break
+                    sys.stdout.write(msg)
+                    sys.stdout.flush()
+                # r is sys.stdin, read inputs and send to the client
+                if sys.stdin in readable:
+                    msg = sys.stdin.readline()
+                    # print("Server read message: ", msg)
+                    if msg is None or msg == "":
+                        sys.exit(-1)
+
+                    msg_len = str(len(msg))
+                    # print('raw_msg_len: ', msg_len)
+                    msg_len = self.encrypt(msg_len)  # iv: 16bytes, msg_len: 16bytes
+                    # print('msg_len: ', msg_len)
+                    mac1 = self.generate_mac1(iv + msg_len)  # mac: 32bytes
+                    # print('mac1: ', mac1)
+
+                    msg = self.encrypt(msg)
+                    mac2 = self.generate_mac2(msg)
+                    # print('mac2 data: ', mac2)
+                    final_msg = iv + msg_len + mac1 + msg + mac2
+                    # final_msg = struct.pack(f'16c16c32c{len(msg)}c32c', iv, msg_len, mac1, msg, mac2)
+
+                    sock.sendall(final_msg)
 
 
-class SelectClient:
+class SelectClient(object):
     """
     The client side of instant messaging service.
     """
-    def __init__(self, host: str, confkey: str, authkey: str, iv: str):
+
+    def __init__(self, host: str, confkey: str, authkey: str):
         """
         :param host: the address of server
         :param confkey: the confidential key of AES256
@@ -128,10 +169,14 @@ class SelectClient:
         # self.socket.setblocking(False)
         self.socket.connect((self.dst_host, self.dst_port))
 
+        self.iv = os.urandom(16)
+        self.socket.send(self.iv)
+
         self.in_channels = [self.socket, sys.stdin]
-        self.encryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
-        self.decryptor = AES.new(self.confkey, AES.MODE_CBC, iv)
-        self.verifier = HMAC.new(self.authkey, digestmod=SHA256)
+        self.encryptor = AES.new(self.confkey, AES.MODE_CBC, self.iv)
+        self.decryptor = AES.new(self.confkey, AES.MODE_CBC, self.iv)
+        self.mac1_verifier = HMAC.new(self.authkey, digestmod=SHA256)
+        self.mac2_verifier = HMAC.new(self.authkey, digestmod=SHA256)
         # self.out_channels = []
 
     def encrypt(self, msg: str) -> bytes:
@@ -159,15 +204,25 @@ class SelectClient:
         # print("unpadded msg: ", enc_msg)
         return plain_msg
 
-    def generate_mac(self, data: bytes) -> bytes:
-        return self.verifier.update(data).digest()
+    def generate_mac1(self, data: bytes) -> bytes:
+        return self.mac1_verifier.update(data).digest()
 
-    def verify_mac(self, data: bytes, mac: bytes) -> None:
+    def verify_mac1(self, data: bytes, mac: bytes) -> None:
+        # print('mac1 in method: ', data)
         try:
-            self.verifier.update(data).verify(mac)
+            self.mac1_verifier.update(data).verify(mac)
         except ValueError:
-            print('ERROR: HMAC verification failed')
-            sys.exit(-1)
+            print("ERROR: HMAC in method 1 verification failed")
+
+    def generate_mac2(self, data: bytes) -> bytes:
+        return self.mac2_verifier.update(data).digest()
+
+    def verify_mac2(self, data: bytes, mac: bytes) -> None:
+        # print("mac2 data: ", mac)
+        try:
+            self.mac2_verifier.update(data).verify(mac)
+        except ValueError:
+            print("ERROR: HMAC in method 2 verification failed")
 
     def run(self):
         while True:
@@ -175,28 +230,46 @@ class SelectClient:
             for r in readable:
                 # if r is the socket, then receive the message and print
                 if r is self.socket:
-                    msg = r.recv(1500)
+                    raw_data = r.recv(1536)
                     # print("RAW_MSG: ", msg)
-                    if not msg:
-                        sys.exit(-1)
-                    else:
-                        msg, mac = msg[:-32], msg[-32:]
-                        self.verify_mac(msg, mac)
-                        msg = self.decrypt(msg)
-                        sys.stdout.write(msg)
-                        sys.stdout.flush()
+                    iv, msg_len, mac1, msg, mac2 = raw_data[:16], raw_data[16:32], raw_data[32:64], \
+                                                   raw_data[64: -32], raw_data[-32:]
+                    # print("Received data: ", data)
+                    try:
+                        self.verify_mac1(iv + msg_len, mac1)
+                        self.verify_mac2(msg, mac2)
+                        # pass
+                    except ValueError:
+                        print("ERROR: HMAC verification failed")
+                        break
                         # print(msg, flush=True)
+                    msg_len = int(self.decrypt(msg_len))
+                    msg = self.decrypt(msg)
+                    if msg_len != len(msg):
+                        continue
+                    sys.stdout.write(msg)
+                    sys.stdout.flush()
 
                 # else means r is the sys.stdin, so read the line then send the message
                 else:
                     msg = r.readline()
-                    # print("Client read message: ", msg)
+                    msg_len = str(len(msg))
+                    msg_len = self.encrypt(msg_len)  # iv: 16bytes, msg_len: 16bytes
+                    # print('msg_len: ', len(msg_len))
+                    mac1 = self.generate_mac1(self.iv + msg_len)  # mac: 32bytes
+                    # print('iv + msg_len mac1 ', self.iv + msg_len)
+                    # print('mac1: ', len(mac1))
+
                     msg = self.encrypt(msg)
-                    # hashx = self.verifier.update(msg).digest()
-                    # msg += hashx
-                    mac = self.generate_mac(msg)
-                    msg += mac
-                    self.socket.sendall(msg)
+                    mac2 = self.generate_mac2(msg)
+                    # print('mac2 in client: ', mac2)
+                    final_msg = self.iv + msg_len + mac1 + msg + mac2
+                    # print('iv: ', self.iv)
+                    # print('msg_len: ', msg_len)
+                    # print('mac1: ', mac1)
+                    # print('msg: ', msg)
+                    # print('mac2: ', mac2)
+                    self.socket.sendall(final_msg)
 
 
 if __name__ == '__main__':
@@ -210,17 +283,18 @@ if __name__ == '__main__':
 
     # The key must be 32 bytes long to use AES-256
     # assert len(args.confkey.encode('utf-8')) == 32
+    if len(args.confkey.encode('utf-8')) < 32:
+        args.confkey += (32 - len(args.confkey.encode('utf-8'))) * 'a'
     # if args.s is False and args.c is not None:
     #     raise AttributeError("s and c cannot be set simultaneously")
     # args.s = 1
 
     # length of iv must be strictly 16 bytes
     # to be more random, we pick the first 16 bytes from the confkey
-    iv = args.confkey.encode('utf-8')[:16]
 
     if args.s and args.s >= 1:
-        SelectServer(args.confkey, args.authkey, iv).run()
+        SelectServer(args.confkey, args.authkey).run()
     elif args.c:
-        SelectClient(args.c, args.confkey, args.authkey, iv).run()
+        SelectClient(args.c, args.confkey, args.authkey).run()
     else:
         pass
