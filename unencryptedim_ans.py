@@ -1,4 +1,6 @@
 # hw1p1.py
+from Crypto.Cipher import AES
+from Crypto.Hash import HMAC, SHA256
 
 import argparse
 import select
@@ -10,6 +12,17 @@ import signal
 HOST = ''
 PORT = 9999
 SOCKET_LIST = []
+
+BLOCK_SIZE = AES.block_size
+
+
+def pad(s: str) -> str:
+    padding = (BLOCK_SIZE - len(s.encode("utf-8")) % BLOCK_SIZE) * chr(BLOCK_SIZE - len(s.encode("utf-8")) % BLOCK_SIZE)
+    return s + padding
+
+
+def unpad(s: str) -> str:
+    return s[:-ord(s[len(s) - 1:])]
 
 
 def handler(signum, frame):
@@ -47,12 +60,39 @@ def connect_to_host(dst):
         sys.exit(0)
 
 
+def encrypt(encryptor, msg: str) -> bytes:
+    padded_msg = pad(msg)
+    # print('Padded msg:', padded_msg.encode('utf-8'))
+    enc_msg = encryptor.encrypt(padded_msg.encode("utf-8"))
+    # print('Encrypted msg: ', enc_msg)
+    return enc_msg
+
+
+def decrypt(decryptor, enc_msg: bytes) -> str:
+    # print("enc_msg is: ", enc_msg)
+    temp = decryptor.decrypt(enc_msg)
+    # print("decrypted msg is: ", temp)
+    enc_msg = unpad(temp.decode("utf-8"))
+    # print("unpadded msg: ", enc_msg)
+    return enc_msg
+
+
+def generate_mac(verifier, data: bytes) -> bytes:
+    return verifier.update(data).digest()
+
+
+def verify_mac(verifier, data: bytes, mac: bytes) -> None:
+    verifier.update(data).verify(mac)
+
+
 def parse_command_line():
     """ parse the command-line """
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--c", dest="dst", help="destination address")
     parser.add_argument("-s", "--s", dest="server", action="store_true",
                         default=False, help="start server mode")
+    parser.add_argument("--confkey", required=False, type=str, default='0' * 32, help="Confidential Key")
+    parser.add_argument("--authkey", required=False, type=str, default='1' * 16, help="Authentication Key")
 
     options = parser.parse_args()
 
@@ -77,6 +117,12 @@ if __name__ == "__main__":
     else:
         assert (False)  # this shouldn't happen
 
+    iv = options.confkey.encode('utf-8')[:16]
+
+    encryptor = AES.new(options.confkey, AES.MODE_CBC, iv)
+    decryptor = AES.new(options.confkey, AES.MODE_CBC, iv)
+    verifier = HMAC.new(options.authkey, digestmod=SHA256)
+
     rlist = [s, sys.stdin]
     wlist = []
     xlist = []
@@ -84,18 +130,23 @@ if __name__ == "__main__":
     while True:
         (r, w, x) = select.select(rlist, wlist, xlist)
         if s in r:  # there is data to read from network
-            data = s.recv(1024)
-            data = data.decode("utf-8")
-            if data == "":  # other side ended connection
+            data = s.recv(1536)
+            msg, mac = data[:-32], data[-32:]
+            verify_mac(verifier, msg, mac)
+            msg = decrypt(decryptor, msg)
+            if msg == "":  # other side ended connection
                 break
-            sys.stdout.write(data)
+            sys.stdout.write(msg)
             sys.stdout.flush()
 
         if sys.stdin in r:  # there is data to read from stdin
             data = sys.stdin.readline()
             if data == "":  # we closed STDIN
                 break
-            s.send(str.encode(data))
+            msg = encrypt(encryptor, data)
+            mac = generate_mac(verifier, msg)
+            msg += mac
+            s.send(msg)
 
     """
             If we get here, then we've got an EOF in either stdin or our network.

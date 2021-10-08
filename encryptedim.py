@@ -22,7 +22,7 @@ def unpad(s: str) -> str:
     return s[:-ord(s[len(s) - 1:])]
 
 
-class SelectServer:
+class GeneralModule:
     def __init__(self, confkey, authkey):
         self.host = 'localhost'
         self.port = 9999
@@ -32,9 +32,6 @@ class SelectServer:
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind((self.host, self.port))
-        self.socket.listen(3)  # listen up to 3 connections. in this case, 1 is enough
-        # print('listening on 127.0.0.1:9999')
 
         self.in_channels = [self.socket, sys.stdin]  # list of readable sockets for select
         self.out_channels = []  # list of writable sockets for select
@@ -43,11 +40,6 @@ class SelectServer:
         self.decryptor = None
         self.mac1_verifier = None
         self.mac2_verifier = None
-
-    def wait_for_connection(self) -> socket.socket:
-        conn, _ = self.socket.accept()
-        self.in_channels.append(conn)
-        return conn
 
     def encrypt(self, msg: str) -> bytes:
         padded_msg = pad(msg)
@@ -77,7 +69,18 @@ class SelectServer:
     def verify_mac2(self, data: bytes, mac: bytes) -> None:
         # print('mac2 data: ', mac)
         self.mac2_verifier.update(data).verify(mac)
-        # sys.exit(-1)
+
+
+class SelectServer(GeneralModule):
+    def __init__(self, confkey, authkey):
+        super(SelectServer, self).__init__(confkey=confkey, authkey=authkey)
+        self.socket.bind((self.host, self.port))
+        self.socket.listen(3)  # listen up to 3 connections. in this case, 1 is enough
+
+    def wait_for_connection(self) -> socket.socket:
+        conn, _ = self.socket.accept()
+        self.in_channels.append(conn)
+        return conn
 
     def run(self):
         while True:
@@ -146,7 +149,7 @@ class SelectServer:
                     sock.sendall(final_msg)
 
 
-class SelectClient(object):
+class SelectClient(GeneralModule):
     """
     The client side of instant messaging service.
     """
@@ -159,14 +162,10 @@ class SelectClient(object):
         :param iv: initialization vector to initialize encryptor in CBC mode. Without it, the first message would be lost
         since it is viewed as the iv.
         """
+        super(SelectClient, self).__init__(confkey=confkey, authkey=authkey)
         self.dst_host = host
         self.dst_port = 9999
-        self.confkey = confkey.encode('utf-8')
-        self.authkey = authkey.encode('utf-8')
 
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # self.socket.setblocking(False)
         self.socket.connect((self.dst_host, self.dst_port))
 
         self.iv = os.urandom(16)
@@ -178,51 +177,6 @@ class SelectClient(object):
         self.mac1_verifier = HMAC.new(self.authkey, digestmod=SHA256)
         self.mac2_verifier = HMAC.new(self.authkey, digestmod=SHA256)
         # self.out_channels = []
-
-    def encrypt(self, msg: str) -> bytes:
-        """
-        Encrypt messages in bytes and return the encrypted bytes
-        :param msg: str, plaintext you want to send.
-        :return: enc_msg: str, ciphertext after encryption.
-        """
-        padded_msg = pad(msg)
-        # print('Padded msg:', padded_msg.encode('utf-8'))
-        enc_msg = self.encryptor.encrypt(padded_msg.encode("utf-8"))
-        # print('Encrypted msg: ', enc_msg)
-        return enc_msg
-
-    def decrypt(self, enc_msg: bytes) -> str:
-        """
-        Decrypt the received ciphered message.
-        :param enc_msg: bytes, ciphertext of raw messages
-        :return: plain_msg: str, plaintext after decryption
-        """
-        # print("enc_msg is: ", enc_msg)
-        temp = self.decryptor.decrypt(enc_msg)
-        # print("decrypted msg is: ", temp)
-        plain_msg = unpad(temp.decode("utf-8"))
-        # print("unpadded msg: ", enc_msg)
-        return plain_msg
-
-    def generate_mac1(self, data: bytes) -> bytes:
-        return self.mac1_verifier.update(data).digest()
-
-    def verify_mac1(self, data: bytes, mac: bytes) -> None:
-        # print('mac1 in method: ', data)
-        try:
-            self.mac1_verifier.update(data).verify(mac)
-        except ValueError:
-            print("ERROR: HMAC in method 1 verification failed")
-
-    def generate_mac2(self, data: bytes) -> bytes:
-        return self.mac2_verifier.update(data).digest()
-
-    def verify_mac2(self, data: bytes, mac: bytes) -> None:
-        # print("mac2 data: ", mac)
-        try:
-            self.mac2_verifier.update(data).verify(mac)
-        except ValueError:
-            print("ERROR: HMAC in method 2 verification failed")
 
     def run(self):
         while True:
