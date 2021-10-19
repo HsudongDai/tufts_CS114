@@ -1,8 +1,10 @@
 import argparse
+import random
 import select
 import signal
 import socket
 import sys
+import numpy as np
 
 
 class GeneralModule:
@@ -15,6 +17,12 @@ class GeneralModule:
 
         self.in_channels = [self.socket, sys.stdin]  # list of readable sockets for select
         self.out_channels = []  # list of writable sockets for select
+
+        # for DH algorithm
+        self.g_base = 2
+        self.p_prime = 0xcc81ea8157352a9e9a318aac4e33ffba80fc8da3373fb44895109e4c3ff6cedcc55c02228fccbd551a504feb4346d2aef47053311ceaba95f6c540b967b9409e9f0502e598cfc71327c5a455e2e807bede1e0b7d23fbea054b951ca964eaecae7ba842ba1fc6818c453bf19eb9c5c86e723e69a210d4b72561cab97b3fb3060b
+
+        self.confkey = None
 
     def handler(self, signum, frame):
         """ handle a SIGINT (ctrl-C) keypress """
@@ -29,6 +37,9 @@ class SelectServer(GeneralModule):
         self.socket.bind((self.host, self.port))
         self.socket.listen(3)  # listen up to 3 connections. in this case, 1 is enough
 
+        self.b = None
+        self.B = None
+
         # self.msg_queues = {}                      # one-to-one connection, unnecessary to use a dict for msg queue
 
     def wait_for_connection(self):
@@ -39,6 +50,8 @@ class SelectServer(GeneralModule):
     def run(self):
         signal.signal(signal.SIGINT, self.handler)
         sock = self.wait_for_connection()
+        self.b = int(random.uniform(0, self.p_prime))
+
         while self.in_channels:
             readable, _, _ = select.select(self.in_channels, [], [])
 
@@ -50,9 +63,15 @@ class SelectServer(GeneralModule):
                     # force to flush every message by setting flush=True
                     data = data.decode('utf-8')
                     data = data.strip('\n')
-                    data += '\n'
-                    sys.stdout.write(data)
-                    sys.stdout.flush()
+                    if self.confkey is None:
+                        A = int(data)
+                        self.confkey = pow(A, self.b, self.p_prime)
+                        sys.stdout.write(str(self.confkey) + '\n')
+                        sys.stdout.flush()
+
+                        self.B = pow(self.g_base, self.b, self.p_prime)
+                        sock.sendall(bytes(str(self.B) + '\n', encoding='utf-8'))
+                        sys.exit(1)
                     # print(data, flush=True)
 
                     if sock not in self.out_channels:
@@ -82,8 +101,14 @@ class SelectClient(GeneralModule):
         self.in_channels = [self.socket, sys.stdin]
         # self.out_channels = []
 
+        self.a = None
+        self.A = None
+
     def run(self):
         signal.signal(signal.SIGINT, self.handler)
+        self.a = int(random.uniform(0, self.p_prime))
+        self.A = pow(2, self.a, self.p_prime)
+        self.socket.sendall(bytes(str(self.A) + '\n', encoding='utf-8'))
         while True:
             readable, _, _ = select.select(self.in_channels, [], [])
             for r in readable:
@@ -96,9 +121,13 @@ class SelectClient(GeneralModule):
                         # sys.stdout.write(msg.decode('utf-8'))
                         msg = msg.decode('utf-8')
                         msg = msg.strip('\n')
-                        msg += '\n'
-                        sys.stdout.write(msg)
-                        sys.stdout.flush()
+                        if self.confkey is None:
+                            B = int(msg)
+                            self.confkey = pow(B, self.a, self.p_prime)
+                            sys.stdout.write(str(self.confkey) + '\n')
+                            sys.stdout.flush()
+
+                            sys.exit(1)
                         # print(msg, flush=True)
 
                 # else means r is the sys.stdin, so read the line then send the message
