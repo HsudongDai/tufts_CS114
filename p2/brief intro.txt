@@ -1,0 +1,3 @@
+Everytime when the sender(maybe server or client) wants to send a message, it would randomly generate a 16-byte IV by calling os.urandom. Then it would put the IV at the very beginning of each message sent out. 
+
+The format of data follows the instruction on Piazza, which is {iv, encrypted_len_of_msg, MAC(encrypted_len_of_msg), encrypted_msg, MAC(encrypted_msg)}.
